@@ -1,6 +1,7 @@
 'use strict';
 
 const { debug, info, warn, error } = require('portal-env').Logger('portal-auth:app');
+const prometheusMiddleware = require('portal-env').PrometheusMiddleware;
 const express = require('express');
 const bodyParser = require('body-parser');
 const cookieParser = require('cookie-parser');
@@ -45,6 +46,15 @@ debug('Session duration: ' + sessionMinutes + ' minutes.');
 
 export const app: any = express();
 
+function rejectFromKong(req, res, next) {
+    const via = req.get('via');
+    if (via && via.toLowerCase().indexOf('kong') > 0) {
+        res.status(403).json({ code: 403, message: 'Not allowed from outside network.' });
+        return;
+    }
+    return next();
+}
+
 app.initApp = function (authServerConfig: WickedAuthServer, callback: SimpleCallback) {
     // Store auth Config with application
     app.authConfig = authServerConfig;
@@ -71,8 +81,7 @@ app.initApp = function (authServerConfig: WickedAuthServer, callback: SimpleCall
 
     app._startupSeconds = utils.getUtc();
 
-    app.get('/ping', answerPing);
-    app.get(basePath + '/ping', answerPing);
+    app.use(prometheusMiddleware.middleware('wicked_auth'));
     
     function answerPing(req, res, next) {
         debug('/ping');
@@ -124,6 +133,11 @@ app.initApp = function (authServerConfig: WickedAuthServer, callback: SimpleCall
         return req.correlationId;
     });
     app.use(logger('{"date":":date[clf]","method":":method","url":":url","remote-addr":":remote-addr","version":":http-version","status":":status","content-length":":res[content-length]","referrer":":referrer","response-time":":response-time","correlation-id":":correlation-id"}'));
+
+    app.get('/metrics', rejectFromKong, prometheusMiddleware.metrics);
+
+    app.get('/ping', answerPing);
+    app.get(basePath + '/ping', answerPing);
 
     app.use(bodyParser.json());
     app.use(bodyParser.urlencoded({ extended: false }));

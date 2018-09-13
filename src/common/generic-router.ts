@@ -21,6 +21,8 @@ import { OidcProfile, WickedApiScopes, WickedGrant, WickedUserInfo, WickedUserCr
 import { GrantManager } from './grant-manager';
 
 const ERROR_TIMEOUT = 500; // ms
+const EXTERNAL_URL_INTERVAL = 500;
+const EXTERNAL_URL_RETRIES = 10;
 
 export class GenericOAuth2Router {
 
@@ -703,6 +705,7 @@ export class GenericOAuth2Router {
         const userId = authResponse.userId;
 
         const authRequest = utils.getAuthRequest(req, this.authMethodId);
+        // This is not necessarily filled yet, but might be in a second run of this flow:
         const namespace = authRequest.namespace;
         const instance = this;
         utils.getPoolInfoByApi(authRequest.api_id, function (err, poolInfo) {
@@ -890,7 +893,7 @@ export class GenericOAuth2Router {
                 if (err)
                     return failError(500, err, next);
                 if (!scopeResponse.allow) {
-                    let msg = 'Scope validation with external system disallowed login';
+                    let msg = 'Scope validation with external system disallowed login (property "allow" is not present or not set to true)';
                     if (scopeResponse.error_message)
                         msg += `: ${scopeResponse.error_message}`;
                     return failMessage(403, msg, next);
@@ -915,18 +918,28 @@ export class GenericOAuth2Router {
             scope: scope,
             profile: profile
         }
-        request.post({
-            url: url,
-            body: scopeRequest,
-            json: true,
-            timeout: 5000
-        }, (err, res, body) => {
+        async.retry({
+            times: EXTERNAL_URL_RETRIES,
+            interval: EXTERNAL_URL_INTERVAL
+        }, function (callback) {
+            debug(`resolvePassthroughScope: Attempting to get scope at ${url}`);
+            request.post({
+                url: url,
+                body: scopeRequest,
+                json: true,
+                timeout: 5000
+            }, (err, res, body) => {
+                if (err)
+                    return callback(err);
+                if (res.statusCode < 200 || res.statusCode > 299)
+                    return callback(makeError('Scope resolving via external service failed with unexpected status code.', res.statusCode));
+                const scopeResponse = utils.getJson(body) as PassthroughScopeResponse;
+                return callback(null, scopeResponse)
+            });
+        }, function (err, scopeResponse) {
             if (err)
                 return callback(err);
-            if (res.statusCode < 200 || res.statusCode > 299)
-                return callback(makeError('Scope resolving via external service failed with unexpected status code.', res.statusCode));
-            const scopeResponse = utils.getJson(body) as PassthroughScopeResponse;
-            return callback(null, scopeResponse)
+            return callback(null, scopeResponse);
         });
     }
 
@@ -1132,6 +1145,14 @@ export class GenericOAuth2Router {
         return returnScope;
     }
 
+    private makeAuthenticatedUserId(authRequest: AuthRequest, authResponse: AuthResponse) {
+        debug(`makeAuthenticatedUserId()`);
+        let authenticatedUserId = `sub=${authResponse.profile.sub}`;
+        if (authRequest.namespace)
+            authenticatedUserId += `;namespace=${authRequest.namespace}`;
+        return authenticatedUserId;
+    }
+
     private authorizeFlow_Step2(req, res, next): void {
         debug(`authorizeFlow_Step2(${this.authMethodId})`);
         const authRequest = utils.getAuthRequest(req, this.authMethodId);
@@ -1141,7 +1162,7 @@ export class GenericOAuth2Router {
         debug(userProfile);
         oauth2.authorize({
             response_type: authRequest.response_type,
-            authenticated_userid: userProfile.sub,
+            authenticated_userid: this.makeAuthenticatedUserId(authRequest, authResponse),
             api_id: authRequest.api_id,
             client_id: authRequest.client_id,
             scope: GenericOAuth2Router.mergeUserGroupScope(authRequest.scope, authResponse.groups),
@@ -1160,6 +1181,8 @@ export class GenericOAuth2Router {
                     return failError(500, err, next);
                 if (authRequest.state)
                     uri += '&state=' + qs.escape(authRequest.state);
+                if (authRequest.namespace)
+                    uri += '&namespace=' + qs.escape(authRequest.namespace);
                 return res.redirect(uri);
             });
         });
@@ -1234,7 +1257,7 @@ export class GenericOAuth2Router {
                             // Does this API have a registration pool at all?
                             if (!apiInfo.registrationPool) {
                                 // No, this is fine. Now check if we can issue a token.
-                                tokenRequest.authenticated_userid = authResponse.userId;
+                                tokenRequest.authenticated_userid = `sub=${authResponse.userId}`;
                                 tokenRequest.session_data = authResponse.profile;
                                 return oauth2.token(tokenRequest, callback);
                             } else {
@@ -1257,7 +1280,7 @@ export class GenericOAuth2Router {
                                             }
                                             // OK, we're fine.
                                             debug('tokenPasswordGrant: Success so far, issuing token.');
-                                            tokenRequest.authenticated_userid = authResponse.userId;
+                                            tokenRequest.authenticated_userid = `sub=${authResponse.userId}`;
                                             tokenRequest.session_data = authResponse.profile;
                                             return oauth2.token(tokenRequest, callback);
                                         } else {
@@ -1399,10 +1422,11 @@ export class GenericOAuth2Router {
     private static extractUserId(authUserId: string): string {
         if (!authUserId.startsWith('sub='))
             return authUserId;
+        // Does it look like this: "sub=<user id>;namespace=<whatever>"
         const semicolonIndex = authUserId.indexOf(';');
         if (semicolonIndex < 0) {
-            warn(`extractUserId: Expected authenticated_userid of this form: sub=<...>;namespace=<...>, received ${authUserId}`);
-            return authUserId;
+            // We have only sub=<userid>, no namespace
+            return authUserId.substring(4);
         }
         return authUserId.substring(4, semicolonIndex);
     }
@@ -1430,8 +1454,8 @@ export class GenericOAuth2Router {
 
             debug('refresh token info:');
             debug(tokenInfo);
-            // kongUtils.lookupApiFromKongApiId(tokenInfo.api_id, function (err, apiInfo) {
-            kongUtils.lookupApiFromKongApiId(tokenInfo.service_id, function (err, apiInfo) {
+
+            kongUtils.lookupApiFromKongCredential(tokenInfo.credential_id, function (err, apiInfo) {
                 if (err)
                     return failOAuth(500, 'server_error', 'could not lookup API from given refresh token.', err, callback);
 
