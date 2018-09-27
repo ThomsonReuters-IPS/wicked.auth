@@ -140,7 +140,7 @@ export class GenericOAuth2Router {
                 if (!verificationInfo)
                     return setTimeout(failMessage, ERROR_TIMEOUT, 404, 'The given verification ID is not valid.', next);
 
-                const viewModel = utils.createViewModel(req, authMethodId);
+                const viewModel = utils.createViewModel(req, authMethodId, 'verify');
                 viewModel.email = verificationInfo.email;
                 viewModel.id = verificationId;
 
@@ -164,7 +164,7 @@ export class GenericOAuth2Router {
             debug(`verifyPostHandler(${authMethodId})`);
 
             const body = req.body;
-            const expectedCsrfToken = utils.getAndDeleteCsrfToken(req);
+            const expectedCsrfToken = utils.getAndDeleteCsrfToken(req, 'verify');
             const csrfToken = body._csrf;
             const verificationId = body.verification_id;
             const verificationType = body.type;
@@ -229,23 +229,23 @@ export class GenericOAuth2Router {
         };
     };
 
-    public createForgotPasswordHandler(authMethodId): ExpressHandler {
+    public createForgotPasswordHandler(authMethodId: string): ExpressHandler {
         debug(`createForgotPasswordHandler(${authMethodId})`);
         return (req, res, next) => {
             debug(`forgotPasswordHandler(${authMethodId})`);
 
-            const viewModel = utils.createViewModel(req, authMethodId);
+            const viewModel = utils.createViewModel(req, authMethodId, 'forgot_password');
             return utils.render(req, res, 'forgot_password', viewModel);
         };
     }
 
-    public createForgotPasswordPostHandler(authMethodId): ExpressHandler {
+    public createForgotPasswordPostHandler(authMethodId: string): ExpressHandler {
         debug(`createForgotPasswordPostHandler(${authMethodId})`);
         return function (req, res, next): void {
             debug(`forgotPasswordPostHandler(${authMethodId})`);
 
             const body = req.body;
-            const expectedCsrfToken = utils.getAndDeleteCsrfToken(req);
+            const expectedCsrfToken = utils.getAndDeleteCsrfToken(req, 'forgot_password');
             const csrfToken = body._csrf;
             const email = body.email;
 
@@ -423,6 +423,8 @@ export class GenericOAuth2Router {
             const givenPrompt = req.query.prompt;
             // This is not OAuth2 compliant, but needed
             const givenNamespace = req.query.namespace;
+            const givenCodeChallenge = req.query.code_challenge;
+            const givenCodeChallengeMethod = req.query.code_challenge_method;
 
             const authRequest = instance.initAuthRequest(req);
             authRequest.api_id = apiId;
@@ -433,6 +435,9 @@ export class GenericOAuth2Router {
             authRequest.scope = givenScope;
             authRequest.prompt = givenPrompt;
             authRequest.namespace = givenNamespace;
+            // PKCE, RFC 7636
+            authRequest.code_challenge = givenCodeChallenge;
+            authRequest.code_challenge_method = givenCodeChallengeMethod;
 
             // Validate parameters first now (TODO: This is pbly feasible centrally,
             // it will be the same for all Auth Methods).
@@ -782,7 +787,7 @@ export class GenericOAuth2Router {
         }, (err, results: WickedNamespace[]) => {
             if (err)
                 return failError(500, err, next);
-            const viewModel = utils.createViewModel(req, instance.authMethodId);
+            const viewModel = utils.createViewModel(req, instance.authMethodId, 'select_namespace');
             debug(results);
             const tmpNs = [];
             for (let i = 0; i < results.length; ++i) {
@@ -807,7 +812,7 @@ export class GenericOAuth2Router {
             debug(`selectNamespacePostHandler(${authMethodId})`);
             const body = req.body;
             debug(body);
-            const expectedCsrfToken = utils.getAndDeleteCsrfToken(req);
+            const expectedCsrfToken = utils.getAndDeleteCsrfToken(req, 'select_namespace');
             const csrfToken = body._csrf;
 
             if (!csrfToken || expectedCsrfToken !== csrfToken) {
@@ -850,7 +855,7 @@ export class GenericOAuth2Router {
             debug('Default profile:');
             debug(authResponse.defaultProfile);
 
-            const viewModel = utils.createViewModel(req, this.authMethodId);
+            const viewModel = utils.createViewModel(req, this.authMethodId, 'register');
             viewModel.userId = authResponse.userId;
             viewModel.customId = authResponse.customId;
             viewModel.defaultProfile = authResponse.defaultProfile;
@@ -1005,7 +1010,7 @@ export class GenericOAuth2Router {
                         return failError(500, err, next);
                     debug('Creating view model for grant scope form');
 
-                    const viewModel = utils.createViewModel(req, instance.authMethodId);
+                    const viewModel = utils.createViewModel(req, instance.authMethodId, 'grants');
                     viewModel.grantRequests = instance.makeScopeList(missingGrants, apiInfo.settings.scopes);
                     viewModel.apiInfo = apiInfo;
                     viewModel.appInfo = appInfo;
@@ -1053,7 +1058,7 @@ export class GenericOAuth2Router {
         return (req, res, next): void => {
             debug(`grantPostHandler(${authMethodId})`);
             const body = req.body;
-            const expectedCsrfToken = utils.getAndDeleteCsrfToken(req);
+            const expectedCsrfToken = utils.getAndDeleteCsrfToken(req, 'grants');
             const csrfToken = body._csrf;
             const action = body._action;
             debug(`grantPostHandler(${authMethodId}, action: ${action})`);
@@ -1174,6 +1179,12 @@ export class GenericOAuth2Router {
             if (!redirectUri.redirect_uri)
                 return failMessage(500, 'Server error, no redirect URI returned.', next);
             let uri = redirectUri.redirect_uri;
+            // In the PKCE case, also associate the code_challenge and code_challenge_method with
+            // the profile, as we need to verify those when getting the token. These may both be
+            // null, but that is okay.
+            userProfile.code_challenge = authRequest.code_challenge;
+            userProfile.code_challenge_method = authRequest.code_challenge_method;
+            
             // For this redirect_uri, which can contain either a code or an access token,
             // associate the profile (userInfo).
             profileStore.registerTokenOrCode(redirectUri, authRequest.api_id, userProfile, function (err) {
@@ -1219,8 +1230,12 @@ export class GenericOAuth2Router {
                         // Don't answer wrong logins immediately please.
                         // TODO: The error message must be IdP specific, can be some other type
                         // of error than just wrong username or password.
+                        let code = 'invalid_request';
+                        let msg = 'Invalid username or password.';
+                        if (err.message)
+                            msg += ' ' + err.message;
                         setTimeout(() => {
-                            return failOAuth(err.statusCode, 'invalid_request', 'invalid username or password', callback);
+                            return failOAuth(err.statusCode, code, msg, callback);
                         }, 500);
                         return;
                     }

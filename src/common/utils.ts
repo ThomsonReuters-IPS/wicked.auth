@@ -2,6 +2,7 @@
 
 const cors = require('cors');
 const { debug, info, warn, error } = require('portal-env').Logger('portal-auth:utils');
+const passwordValidator = require('portal-env').PasswordValidator;
 import * as wicked from 'wicked-sdk';
 const async = require('async');
 const crypto = require('crypto');
@@ -13,7 +14,7 @@ const qs = require('querystring');
 
 import { failMessage, failError, failOAuth, makeError } from './utils-fail';
 import { NameSpec, StringCallback, SimpleCallback, AuthRequest, AuthResponse, AuthSession } from './types';
-import { OidcProfile, WickedApi, WickedPool, Callback, WickedUserShortInfo, WickedError } from 'wicked-sdk';
+import { OidcProfile, WickedApi, WickedPool, Callback, WickedUserShortInfo, WickedError, WickedPasswordStrategy } from 'wicked-sdk';
 
 const ERROR_TIMEOUT = 500; // ms
 
@@ -319,8 +320,10 @@ export const utils = {
         wicked.apiPost('/verifications', verifBody, null, callback);
     },
 
-    createViewModel: function (req, authMethodId): any {
-        const csrfToken = utils.createRandomId();
+    createViewModel: function (req, authMethodId: string, csrfSource?: string): any {
+        if (!csrfSource)
+            csrfSource = 'generic';
+        const csrfToken = `${csrfSource}-${utils.createRandomId()}`;
         req.session.csrfToken = csrfToken;
         return {
             title: req.app.glob.title,
@@ -338,14 +341,21 @@ export const utils = {
             grantUrl: `${authMethodId}/grant`,
             manageGrantsUrl: `${authMethodId}/grants`,
             selectNamespaceUrl: `${authMethodId}/selectnamespace`,
-            recaptcha: req.app.glob.recaptcha
+            recaptcha: req.app.glob.recaptcha,
+            changePasswordUrl: `${authMethodId}/changepassword`
         };
     },
 
-    getAndDeleteCsrfToken: function (req): string {
+    getAndDeleteCsrfToken: function (req, csrfSource?: string): string {
         debug('getAndDeleteCsrfToken()');
+        if (!csrfSource)
+            csrfSource = 'generic';
         const csrfToken = req.session.csrfToken;
         delete req.session.csrfToken;
+        if (!csrfToken || !csrfToken.startsWith(csrfSource)) {
+            error(`getAndDeleteCsrfToken: Either no CSRF token is present, or the source mismatches: ${csrfToken} (source ${csrfSource})`)
+            return "<invalid csrf source or csrf not present>";
+        }
         return csrfToken;
     },
 
@@ -474,9 +484,33 @@ export const utils = {
                 viewModel.portalUrl = authRequest.app_url;
         }
         viewModel.i18n = getI18n(req, template);
+        debug(viewModel);
         res.render(template, viewModel);
     }
 };
+
+let _globalI18n = {};
+function loadGlobalI18n(desiredLanguage) {
+    if (_globalI18n[desiredLanguage])
+        return _globalI18n[desiredLanguage];
+    const fileName = path.join(__dirname, '..', 'views', `password_validation.${desiredLanguage}.json`);
+    const strategyName = wicked.getPasswordStrategy();
+    const passwordStrategy = passwordValidator.getStrategy(strategyName) as WickedPasswordStrategy;
+    const i18n = JSON.parse(fs.readFileSync(fileName));
+
+    const translations = {
+        password_rules: i18n[strategyName],
+        password_regex: passwordStrategy.regex
+    };
+    _globalI18n[desiredLanguage] = translations;
+    return translations;
+}
+
+function mergeGlobalI18n(i18n, desiredLanguage) {
+    const globalI18n = loadGlobalI18n(desiredLanguage);
+    for (let k in globalI18n)
+        i18n[k] = globalI18n[k];
+}
 
 const _i18nMap = new Map<string, object>();
 function getI18n(req, template: string): object {
@@ -498,6 +532,9 @@ function getI18n(req, template: string): object {
         return {}
     }
     const i18n = JSON.parse(fs.readFileSync(i18nFile, 'utf8'));
+    mergeGlobalI18n(i18n, desiredLanguage);
+    console.log(`Template: ${template}`);
+    console.log(i18n);
     _i18nMap.set(key, i18n);
     return i18n;
 }
