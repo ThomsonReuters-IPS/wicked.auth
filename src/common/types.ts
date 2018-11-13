@@ -1,6 +1,6 @@
 'use strict';
 
-import { OidcProfile, WickedApiScopes, WickedSubscriptionInfo, WickedScopeGrant, Callback, WickedUserInfo } from "wicked-sdk";
+import { OidcProfile, WickedApiScopes, WickedSubscriptionInfo, WickedScopeGrant, Callback, WickedUserInfo, WickedApi } from "wicked-sdk";
 
 export interface OAuth2Request {
     api_id: string,
@@ -10,6 +10,7 @@ export interface OAuth2Request {
     client_secret?: string,
     // Not needed for client_credentials
     authenticated_userid?: string,
+    authenticated_userid_is_verbose?: boolean,
     namespace?: string,
     
     scope?: any,
@@ -22,6 +23,9 @@ export interface OAuth2Request {
 
 export interface TokenRequest extends OAuth2Request {
     grant_type: string,
+    // In special cases, the refresh token grant is rewritten to a password
+    // grant; this flag allows that explicitly.
+    accept_password_grant?: boolean,
     code?: string,
     username?: string,
     password?: string,
@@ -66,6 +70,11 @@ export interface AuthResponse {
     profile?: OidcProfileEx
 }
 
+export interface SamlAuthResponse extends AuthResponse {
+    name_id: string,
+    session_index: string
+}
+
 export interface GrantProcessInfo {
     missingGrants: string[],
     existingGrants: WickedScopeGrant[]
@@ -94,9 +103,10 @@ export interface IdentityProvider {
     getType: () => string,
     getRouter: () => any,
     authorizeWithUi: (req, res, next, authRequest: AuthRequest) => void,
+    logoutHook?: (req, res, next, redirect_uri: string) => boolean,
     endpoints: () => EndpointDefinition[],
     authorizeByUserPass: (user: string, pass: string, callback: Callback<AuthResponse>) => void,
-    checkRefreshToken: (tokenInfo, callback: Callback<CheckRefreshDecision>) => void
+    checkRefreshToken: (tokenInfo, apiInfo: WickedApi, callback: Callback<CheckRefreshDecision>) => void
 };
 
 export interface IdpOptions {
@@ -108,6 +118,11 @@ export interface LocalIdpConfig {
     disableSignup: boolean,
     trustUsers: boolean
 };
+
+export interface ExternalIdpConfig {
+    validateUserPassUrl: string,
+    allowRefreshUrl: string
+}
 
 export interface OAuth2IdpConfigBase {
     clientId: string,

@@ -2,7 +2,7 @@
 
 import { GenericOAuth2Router } from '../common/generic-router';
 import { AuthRequest, AuthResponse, IdentityProvider, EndpointDefinition, IdpOptions, LocalIdpConfig, CheckRefreshDecision, BooleanCallback } from '../common/types';
-import { OidcProfile, WickedUserInfo, Callback } from 'wicked-sdk';
+import { OidcProfile, WickedUserInfo, Callback, WickedApi } from 'wicked-sdk';
 const { debug, info, warn, error } = require('portal-env').Logger('portal-auth:local');
 import * as wicked from 'wicked-sdk';
 const Router = require('express').Router;
@@ -61,7 +61,7 @@ export class LocalIdP implements IdentityProvider {
         });
     }
 
-    public checkRefreshToken(tokenInfo, callback: Callback<CheckRefreshDecision>) {
+    public checkRefreshToken(tokenInfo, apiInfo: WickedApi, callback: Callback<CheckRefreshDecision>) {
         debug('checkRefreshToken()');
         // Decide whether it's okay to refresh this token or not, e.g.
         // by checking that the user is still valid in your database or such;
@@ -129,9 +129,7 @@ export class LocalIdP implements IdentityProvider {
             if (err) {
                 debug(err);
                 // Delay redisplay of login page a little
-                setTimeout(function () {
-                    instance.renderLogin(req, res, next, 'Username or password invalid.', username);
-                }, 500);
+                setTimeout(() => instance.renderLogin(req, res, next, 'Username or password invalid.', username), 500);
                 return;
             }
 
@@ -164,7 +162,7 @@ export class LocalIdP implements IdentityProvider {
         const instance = this;
 
         if (!csrfToken || expectedCsrfToken !== csrfToken) {
-            setTimeout(this.renderLogin, 500, req, res, next, 'CSRF validation failed, please try again.');
+            setTimeout(() => instance.renderLogin(req, res, next,'CSRF validation failed, please try again.'),  500);
             return;
         }
 
@@ -231,7 +229,7 @@ export class LocalIdP implements IdentityProvider {
         const instance = this;
 
         if (!csrfToken || expectedCsrfToken !== csrfToken)
-            return setTimeout(this.renderSignup, 500, req, res, next, 'CSRF validation failed, please try again.');
+            return setTimeout(() => instance.renderSignup(req, res, next, 'CSRF validation failed, please try again.'), 500);
 
         const email = body.email;
         const password = body.password;

@@ -21,8 +21,8 @@ import { GoogleIdP } from './providers/google';
 import { TwitterIdP } from './providers/twitter';
 import { OAuth2IdP } from './providers/oauth2';
 // import { FacebookIdP } from './providers/facebook';
-// import { AdfsIdP } from './providers/adfs';
-// import { SamlIdP } from './providers/saml';
+import { SamlIdP } from './providers/saml';
+import { ExternalIdP } from './providers/external';
 
 import { StatusError } from './common/utils-fail';
 import { SimpleCallback } from './common/types';
@@ -30,7 +30,6 @@ import { WickedAuthServer } from 'wicked-sdk';
 
 import { utils } from './common/utils';
 import { utilsOAuth2 } from './common/utils-oauth2';
-import { SamlIdP } from './providers/saml';
 
 // Use default options, see https://www.npmjs.com/package/session-file-store
 const sessionStoreOptions = {};
@@ -82,7 +81,7 @@ app.initApp = function (authServerConfig: WickedAuthServer, callback: SimpleCall
     app._startupSeconds = utils.getUtc();
 
     app.use(prometheusMiddleware.middleware('wicked_auth'));
-    
+
     function answerPing(req, res, next) {
         debug('/ping');
         const health = {
@@ -166,6 +165,8 @@ app.initApp = function (authServerConfig: WickedAuthServer, callback: SimpleCall
     // Actual implementation
     // =======================
 
+    app.idpMap = {};
+
     // Here: Read from Auth Methods configuration in default.json
     for (let i = 0; i < authServerConfig.authMethods.length; ++i) {
         const authMethod = authServerConfig.authMethods[i];
@@ -186,6 +187,9 @@ app.initApp = function (authServerConfig: WickedAuthServer, callback: SimpleCall
         switch (authMethod.type) {
             case "local":
                 idp = new LocalIdP(basePath, authMethod.name, authMethod.config, options);
+                break;
+            case "external":
+                idp = new ExternalIdP(basePath, authMethod.name, authMethod.config, options);
                 break;
             case "dummy":
                 idp = new DummyIdP(basePath, authMethod.name, authMethod.config, options);
@@ -213,6 +217,7 @@ app.initApp = function (authServerConfig: WickedAuthServer, callback: SimpleCall
                 break;
         }
         if (idp) {
+            app.idpMap[authMethod.name] = idp;
             app.use(authUri, idp.getRouter());
         }
     }
@@ -221,8 +226,34 @@ app.initApp = function (authServerConfig: WickedAuthServer, callback: SimpleCall
 
     app.get(basePath + '/logout', function (req, res, next) {
         debug(basePath + '/logout');
+
+        const redirect_uri = req.query && req.query.redirect_uri ? req.query.redirect_uri : null;
+        // Iterate over the IdPs and see if they need to do a logout hook
+        for (let authMethodId in app.idpMap) {
+            const idp = app.idpMap[authMethodId];
+            if (idp.logoutHook) {
+                const hasHandledRequest = idp.logoutHook(req, res, next, redirect_uri);
+                if (!hasHandledRequest) {
+                    // Then just delete the session data for this auth Method
+                    utils.deleteSession(req, authMethodId);
+                } else {
+                    // One IDP has taken over; let's quit here. The IdP must make
+                    // sure that this end point is called again after it is done
+                    // with whatever it does when logging out. Plus it must delete
+                    // its own session state. The reason why it's not done here yet
+                    // is that the IdP may need the session data to be able to correctly
+                    // log the user out (e.g. user_id and session_index for SAML).
+                    debug(`IdP ${authMethodId} has taken over, quitting /logout`);
+                    return;
+                }
+            }
+        }
+
+        // Successfully logged out.
+        info('Successfully logged a user out.');
         req.session.destroy();
-        if (req.query && req.query.redirect_uri)
+
+        if (redirect_uri)
             return res.redirect(req.query.redirect_uri);
         utils.render(req, res, 'logout', {
             title: 'Logged out',

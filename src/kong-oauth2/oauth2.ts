@@ -154,6 +154,15 @@ export const oauth2 = {
         });
     },
 
+    tokenAsync: function (inputData: TokenRequest): Promise<AccessToken> {
+        const instance = this;
+        return new Promise<AccessToken>(function (resolve, reject) {
+            instance.token(inputData, function (err, accessToken) {
+                err ? reject(err) : resolve(accessToken);
+            })
+        });
+    },
+
     token: function (inputData: TokenRequest, callback: AccessTokenCallback) {
         validateGrantType(inputData, function (err) {
             if (err)
@@ -489,10 +498,12 @@ function tokenPasswordGrantInternal(inputData: TokenRequest, callback: AccessTok
 
 function tokenPasswordGrantKong(oauthInfo: TokenOAuthInfo, callback: TokenOAuthInfoCallback) {
     debug(oauthInfo.oauth2Config);
-    if (!oauthInfo.oauth2Config ||
-        !oauthInfo.oauth2Config.enable_password_grant)
-        return failOAuth(401, 'unauthorized_client', 'The API ' + oauthInfo.inputData.api_id + ' is not configured for the OAuth2 resource owner password grant.', callback);
-
+    // HACK_PASSTHROUGH_REFRESH: Bypass this check? Refresh Token case with passthrough scopes and users.
+    if (!oauthInfo.inputData.accept_password_grant) {
+        if (!oauthInfo.oauth2Config ||
+            !oauthInfo.oauth2Config.enable_password_grant)
+            return failOAuth(401, 'unauthorized_client', 'The API ' + oauthInfo.inputData.api_id + ' is not configured for the OAuth2 resource owner password grant.', callback);
+    }
     return tokenWithKong(oauthInfo, 'password', callback);
 }
 
