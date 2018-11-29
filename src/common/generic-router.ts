@@ -6,6 +6,7 @@ import { profileStore } from './profile-store'
 const { debug, info, warn, error } = require('portal-env').Logger('portal-auth:generic-router');
 import * as wicked from 'wicked-sdk';
 import * as request from 'request';
+import * as nocache from 'nocache';
 
 import { oauth2 } from '../kong-oauth2/oauth2';
 import { tokens } from '../kong-oauth2/tokens';
@@ -17,7 +18,7 @@ import { utils } from './utils';
 import { kongUtils } from '../kong-oauth2/kong-utils';
 import { utilsOAuth2 } from './utils-oauth2';
 import { failMessage, failError, failOAuth, makeError, failJson, makeOAuthError } from './utils-fail';
-import { OidcProfile, WickedApiScopes, WickedGrant, WickedUserInfo, WickedUserCreateInfo, WickedScopeGrant, WickedNamespace, WickedCollection, WickedRegistration, PassthroughScopeResponse, Callback, PassthroughScopeRequest, WickedApi } from 'wicked-sdk';
+import { OidcProfile, WickedApiScopes, WickedGrant, WickedUserInfo, WickedUserCreateInfo, WickedScopeGrant, WickedNamespace, WickedCollection, WickedRegistration, PassthroughScopeResponse, Callback, PassthroughScopeRequest, WickedApi, WickedSubscriptionInfo, WickedUserShortInfo } from 'wicked-sdk';
 import { GrantManager } from './grant-manager';
 
 const ERROR_TIMEOUT = 500; // ms
@@ -410,6 +411,8 @@ export class GenericOAuth2Router {
 
         const instance = this;
 
+        this.oauthRouter.use(nocache());
+
         // OAuth2 end point Authorize
         this.oauthRouter.get('/api/:apiId/authorize', /*csrfProtection,*/ async function (req, res, next) {
             const apiId = req.params.apiId;
@@ -441,19 +444,19 @@ export class GenericOAuth2Router {
 
             // Validate parameters first now (TODO: This is pbly feasible centrally,
             // it will be the same for all Auth Methods).
-            let validationResult;
+            let subscriptionInfo: WickedSubscriptionInfo;
             try {
-                validationResult = await utilsOAuth2.validateAuthorizeRequest(authRequest);
+                subscriptionInfo = await utilsOAuth2.validateAuthorizeRequest(authRequest);
             } catch (err) {
                 return next(err);
             }
 
             // Is it a trusted application?
-            authRequest.trusted = validationResult.trusted;
+            authRequest.trusted = subscriptionInfo.subscription.trusted;
 
             let scopeValidationResult;
             try {
-                scopeValidationResult = await utilsOAuth2.validateApiScopes(authRequest.api_id, authRequest.scope, authRequest.trusted);
+                scopeValidationResult = await utilsOAuth2.validateApiScopes(authRequest.api_id, authRequest.scope, subscriptionInfo);
             } catch (err) {
                 return next(err);
             }
@@ -465,7 +468,7 @@ export class GenericOAuth2Router {
             // on.
             authRequest.scope = scopeValidationResult.validatedScopes;
             // Did we add/change the scopes passed in?
-            authRequest.scopesDiffer = scopeValidationResult.scopesDiffer;
+            authRequest.scope_differs = scopeValidationResult.scopeDiffers;
 
             let isLoggedIn = utils.isLoggedIn(req, instance.authMethodId);
             // Borrowed from OpenID Connect, check for prompt request for implicit grant
@@ -1194,12 +1197,13 @@ export class GenericOAuth2Router {
         const userProfile = authResponse.profile;
         debug('/authorize/login: Calling authorization end point.');
         debug(userProfile);
+        const scope = GenericOAuth2Router.mergeUserGroupScope(authRequest.scope, authResponse.groups);
         oauth2.authorize({
             response_type: authRequest.response_type,
             authenticated_userid: this.makeAuthenticatedUserId(authRequest, authResponse),
             api_id: authRequest.api_id,
             client_id: authRequest.client_id,
-            scope: GenericOAuth2Router.mergeUserGroupScope(authRequest.scope, authResponse.groups),
+            scope: scope,
             auth_method: req.app.get('server_name') + ':' + this.authMethodId,
         }, function (err, redirectUri) {
             debug('/authorize/login: Authorization end point returned.');
@@ -1213,12 +1217,18 @@ export class GenericOAuth2Router {
             // null, but that is okay.
             userProfile.code_challenge = authRequest.code_challenge;
             userProfile.code_challenge_method = authRequest.code_challenge_method;
+            // This is also a small hack to remember whether we need to send the scopes with the
+            // access token response (because the scope has changed to what was requested).
+            userProfile.scope_differs = authRequest.scope_differs;
 
             // For this redirect_uri, which can contain either a code or an access token,
             // associate the profile (userInfo).
             profileStore.registerTokenOrCode(redirectUri, authRequest.api_id, userProfile, function (err) {
                 if (err)
                     return failError(500, err, next);
+                // IMPLICIT GRANT ONLY
+                if (authRequest.response_type == 'token' && authRequest.scope_differs)
+                    uri += '&scope=' + qs.escape(scope.join(' '));
                 if (authRequest.state)
                     uri += '&state=' + qs.escape(authRequest.state);
                 if (authRequest.namespace)
@@ -1241,14 +1251,14 @@ export class GenericOAuth2Router {
         debug('tokenPasswordGrant()');
         const instance = this;
         // Let's validate the subscription first...
-        const validationResult = await utilsOAuth2.validateSubscription(tokenRequest);
+        const subscriptionInfo = await utilsOAuth2.validateSubscription(tokenRequest);
 
-        const trustedSubscription = validationResult.trusted;
-        if (validationResult.subsInfo.application.confidential) {
+        const trustedSubscription = subscriptionInfo.subscription.trusted;
+        if (subscriptionInfo.application.confidential) {
             // Also check client_secret here
             if (!tokenRequest.client_secret)
                 throw makeOAuthError(401, 'invalid_request', 'A confidential application must also pass its client_secret');
-            if (validationResult.subsInfo.subscription.clientSecret !== tokenRequest.client_secret)
+            if (subscriptionInfo.subscription.clientSecret !== tokenRequest.client_secret)
                 throw makeOAuthError(401, 'invalid_request', 'Invalid client secret');
         }
 
@@ -1267,9 +1277,10 @@ export class GenericOAuth2Router {
         if (!trustedSubscription && !apiInfo.passthroughScopeUrl)
             throw makeOAuthError(400, 'invalid_request', 'only trusted application subscriptions can retrieve tokens via the password grant.');
 
-        const validatedScopes = await utilsOAuth2.validateApiScopes(tokenRequest.api_id, tokenRequest.scope, trustedSubscription);
+        const validatedScopes = await utilsOAuth2.validateApiScopes(tokenRequest.api_id, tokenRequest.scope, subscriptionInfo);
         // Update the scopes
         tokenRequest.scope = validatedScopes.validatedScopes;
+        tokenRequest.scope_differs = validatedScopes.scopeDiffers;
 
         let authResponse: AuthResponse = null;
         try {
@@ -1392,18 +1403,6 @@ export class GenericOAuth2Router {
         }
     }
 
-    private checkUserFromAuthResponse(authResponse: AuthResponse, apiId: string, callback: Callback<AuthResponse>): void {
-        const instance = this;
-        (async () => {
-            try {
-                const result = await instance.checkUserFromAuthResponseAsync(authResponse, apiId);
-                return callback(null, result);
-            } catch (err) {
-                return callback(err);
-            }
-        })();
-    }
-
     private checkUserFromAuthResponseAsync = async (authResponse: AuthResponse, apiId: string): Promise<AuthResponse> => {
         debug(`checkUserFromAuthResponse(..., ${apiId})`);
         const instance = this;
@@ -1448,6 +1447,7 @@ export class GenericOAuth2Router {
                 await instance.createUserFromDefaultProfile(authResponse);
                 return loadWickedUser(authResponse.userId);
             } else {
+                await instance.checkDefaultGroups(shortInfo, authResponse);
                 return loadWickedUser(shortInfo.id);
             }
         } else {
@@ -1498,6 +1498,36 @@ export class GenericOAuth2Router {
             if (err.status === 409 || err.statusCode === 409)
                 throw makeError(`A user with the email address "${userCreateInfo.email}" already exists in the system. Please log in using the existing user's identity.`, 409);
             throw err;
+        }
+    }
+
+    private checkDefaultGroups = async (shortInfo: WickedUserShortInfo, authResponse: AuthResponse): Promise<any> => {
+        debug(`checkDefaultGroups()`);
+        if (!authResponse.defaultGroups)
+            return null;
+        try {
+            const userInfo = await wicked.getUser(shortInfo.id);
+            if (!userInfo.groups)
+                userInfo.groups = [];
+            // Compare groups and default groups
+            let needsUpdate = false;
+            for (let i = 0; i < authResponse.defaultGroups.length; ++i) {
+                const defGroup = authResponse.defaultGroups[i];
+                if (!userInfo.groups.find(g => g == defGroup)) {
+                    userInfo.groups.push(defGroup);
+                    needsUpdate = true;
+                }
+            }
+            if (needsUpdate) {
+                debug(`checkDefaultGroups(): Updated groups to ${userInfo.groups.join(', ')}`);
+                await wicked.patchUser(shortInfo.id, userInfo);
+            }
+            return null;
+        } catch (err) {
+            // Just log the error; this is not good, but should not prevent logging in.
+            error(`checkDefaultGroups(): Checking default groups failed for user with id ${shortInfo.id} (email ${shortInfo.email}).`);
+            error(err);
+            return null;
         }
     }
 
