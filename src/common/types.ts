@@ -127,6 +127,9 @@ export interface ExternalIdpConfig {
     validateUserPassUrl: string,
     allowRefreshUrl: string,
     forgotPasswordUrl: string,
+    // In case you want to override username and password prompts
+    usernamePrompt?: string,
+    passwordPrompt?: string,
 }
 
 export interface OAuth2IdpConfigBase {
@@ -171,7 +174,9 @@ export interface OAuth2IdpConfig extends OAuth2IdpConfigBase {
     // Additional parameters for authorization request
     params?: any,
     // Specify "false" to not attempt authentication with "prompt=none" in case provided with /authorize call
-    doesNotSupportPrompt?: boolean
+    doesNotSupportPrompt?: boolean,
+    // Specify to retrieve profile information from profileEndpoint 
+    retrieveProfile?: boolean
 }
 
 export interface SamlSpOptions {
@@ -212,6 +217,30 @@ export interface SamlIdpConfig {
 export interface TwitterIdpConfig {
     consumerKey: string,
     consumerSecret: string
+};
+
+export interface LdapIdpConfig {
+    trustUsers?: boolean,
+    // ldaps://ldap.company.com:636
+    url: string,
+    ldapUser: string,
+    ldapPassword: string,
+    // DC=domain,DC=company,DC=com
+    base: string,
+    // "(&(objectClass=organizationalPerson)(sAMAccountName=%username%))"
+    filter: string,
+
+    // Expects a map "<profile property>": "<LDAP property>"
+    // from this map, the fields to retrieve are assembled.
+    profile: any,
+
+    // This can be displayed on the login screen, in case you want to give your
+    // users a hint where they can recover their lost passwords.
+    forgotPasswordUrl?: string,
+
+    // In case you want to override username and password prompts
+    usernamePrompt?: string,
+    passwordPrompt?: string,
 };
 
 export interface DummyIdpConfig {
