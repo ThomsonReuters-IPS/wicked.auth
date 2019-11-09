@@ -38,7 +38,8 @@ let server = null;
 
 const wickedOptions = {
     userAgentName: 'wicked.portal-auth',
-    userAgentVersion: utils.getVersion()
+    userAgentVersion: utils.getVersion(),
+    doNotPollConfigHash: true
 };
 
 async.series({
